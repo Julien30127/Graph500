@@ -13,8 +13,8 @@ try:
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend()
     plt.xticks(df_strong['Cœurs(np)'])
-    plt.savefig('graph_strong_scaling.png', dpi=300)
-    print("✅ Graphique Strong Scaling généré : graph_strong_scaling.png")
+    plt.savefig('strong_scaling_MPI_pur.png', dpi=300)
+    print("✅ Graphique Strong Scaling généré : strong_scaling_MPI_pur.png")
 except Exception as e:
     print("Erreur avec le Strong Scaling :", e)
 
@@ -31,7 +31,7 @@ try:
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend()
     plt.xticks(df_weak['Cœurs(np)'])
-    plt.savefig('graph_weak_scaling.png', dpi=300)
-    print("✅ Graphique Weak Scaling généré : graph_weak_scaling.png")
+    plt.savefig('weak_scaling_MPI_pur.png', dpi=300)
+    print("✅ Graphique Weak Scaling généré : weak_scaling_MPI_pur.png")
 except Exception as e:
     print("Erreur avec le Weak Scaling :", e)
