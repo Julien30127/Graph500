@@ -102,60 +102,107 @@ void run_bfs(int64_t root, int64_t* pred) {
     // Tant qu'au moins un nœud sur le supercalculateur a quelque chose à traiter
     while (sum > 0) {
     
-    // Parallelisation de la lecture de la file q1
-    #pragma omp parallel for
-        for (int i = 0; i < qc; i++) {
-            
-            // Chaque thread pioche un sommet
-            int u_local = q1[i];
-            
-            // Nom global ?
-            int64_t u_global = VERTEX_TO_GLOBAL(aml_my_pe(), u_local);
+        int npes = aml_n_pes(); // Nombre total de nœuds MPI
 
-            // On récupère les limites pour lire ses voisins dans le graphe CSR
-            unsigned int start = rowstarts[u_local]; 
-            unsigned int end   = rowstarts[u_local + 1];
+        // Parallelisation de la lecture de la file q1 (Mais cette fois on ouvre la zone avant la boucle pour allouer la RAM locale)
+        #pragma omp parallel 
+        {
+            // Création de l'objet "sac-à-dos"
+            // On définit la taille du sac (à adapter selon la taille du cache L1)
+            const int CHUNK_SIZE = 128; 
+            
+            visitmsg (*local_buf)[CHUNK_SIZE] = malloc(npes * sizeof(*local_buf));
+            
+            // local_count : Combien de messages on a actuellement au fond du sac pour chaque cible
+            int *local_count = calloc(npes, sizeof(int));
 
-            // On boucle sur eux
-            for (unsigned int j = start; j < end; j++) {
+            // On distribue le travail sans barrière immédiate à la fin
+            #pragma omp for nowait
+            for (int i = 0; i < qc; i++) {
                 
-                int64_t v_global = COLUMN(j); 
+                // Chaque thread pioche un sommet
+                int u_local = q1[i];
+                
+                // Nom global ?
+                int64_t u_global = VERTEX_TO_GLOBAL(aml_my_pe(), u_local);
 
-                // À qui est ce voisin ?
-                if (VERTEX_OWNER(v_global) == aml_my_pe()) {
+                // On récupère les limites pour lire ses voisins dans le graphe CSR
+                unsigned int start = rowstarts[u_local]; 
+                unsigned int end   = rowstarts[u_local + 1];
+
+                // On boucle sur eux
+                for (unsigned int j = start; j < end; j++) {
                     
-                    // CAS 1 : Sur "notre" noeud
-                    int v_local = VERTEX_LOCAL(v_global);
-                    unsigned long mask = 1UL << (v_local % ulong_bits);
-                    
-                    unsigned long old_val = __sync_fetch_and_or(&visited[v_local / ulong_bits], mask);
+                    int64_t v_global = COLUMN(j); 
 
-                    // Si l'ancienne valeur ne contenait pas déjà ce bit à 1 
-                    if (!(old_val & mask)) { 
-                        pred[v_local] = u_global;
+                    // À qui est ce voisin ?
+                    if (VERTEX_OWNER(v_global) == aml_my_pe()) {
+                        
+                        // CAS 1 : Sur "notre" noeud
+                        int v_local = VERTEX_LOCAL(v_global);
+                        unsigned long mask = 1UL << (v_local % ulong_bits);
+                        
+                        unsigned long old_val = __sync_fetch_and_or(&visited[v_local / ulong_bits], mask);
 
-                        int my_spot;
-                        #pragma omp atomic capture
-                        {
-                            my_spot = q2c; 
-                            q2c++; 
+                        // Si l'ancienne valeur ne contenait pas déjà ce bit à 1 
+                        if (!(old_val & mask)) { 
+                            pred[v_local] = u_global;
+
+                            int my_spot;
+                            #pragma omp atomic capture
+                            {
+                                my_spot = q2c; 
+                                q2c++; 
+                            }
+                            q2[my_spot] = v_local;
                         }
-                        q2[my_spot] = v_local;
-                    }
-                } else {
+                    } else {
 
-                    // CAS 2 : Sur un autre noeud (aie aie aie, MPI -> rhyme)
-                    int target_rank = VERTEX_OWNER(v_global);
-    
-                    visitmsg msg = {VERTEX_LOCAL(v_global), u_local}; 
+                        // CAS 2 : Sur un autre noeud (aie aie aie, MPI -> rhyme)
+                        int target_rank = VERTEX_OWNER(v_global);
+        
+                        // Au lieu d'envoyer directement, on glisse le voisin dans le sac à dos personnel
+                        int idx = local_count[target_rank];
+                        local_buf[target_rank][idx].vloc = VERTEX_LOCAL(v_global);
+                        local_buf[target_rank][idx].vfrom = u_local;
+                        
+                        local_count[target_rank]++;
 
-                    // On envoie le message via AML (protégé -> potentiel goulot d'étranglement si trop de rank MPI sur une "petite" machine)
-                    #pragma omp critical
-                    {
-                        aml_send(&msg, 1, sizeof(visitmsg), target_rank);
+                        // Si le sac pour cette cible est PLEIN, on passe au péage
+                        if (local_count[target_rank] == CHUNK_SIZE) {
+                            
+                            // On prend le verrou UNE SEULE FOIS pour vider les 128 messages très vite
+                            #pragma omp critical
+                            {
+                                for (int k = 0; k < CHUNK_SIZE; k++) {
+                                    // Envoi un par un pour que le handler AML puisse les digérer
+                                    aml_send(&local_buf[target_rank][k], 1, sizeof(visitmsg), target_rank);
+                                }
+                            }
+                            // On vide le sac : la journée a été dure, la séance de psy coûte cher
+                            local_count[target_rank] = 0;
+                        }
                     }
                 }
             }
+
+            
+            // La boucle est finie, mais il reste peut-être des messages non envoyés dans les sacs -> On vide tout.
+            for(int p = 0; p < npes; p++) {
+                if(local_count[p] > 0) {
+                    #pragma omp critical
+                    {
+                        for (int k = 0; k < local_count[p]; k++) {
+                            aml_send(&local_buf[p][k], 1, sizeof(visitmsg), p);
+                        }
+                    }
+                }
+            }
+
+            
+            free(local_buf);
+            free(local_count);
+
         }
         
         // On attend la réception de tous les messages (qui vont remplir q2 via visithndl)

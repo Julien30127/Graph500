@@ -46,7 +46,7 @@ def plot_weak_scaling():
         
         # Esthétique du graphique
         plt.title('Weak Scaling - Performance du BFS (Taille de graphe croissante)', fontsize=14, fontweight='bold')
-        plt.xlabel('Nombre de Processus MPI (np)', fontsize=12)
+        plt.xlabel('Configuration (Processus MPI & Taille du Graphe)', fontsize=12)
         plt.ylabel('Performance (TEPS - Traversed Edges Per Second)', fontsize=12)
         
         # Ajout des labels X avec le SCALE correspondant
@@ -65,7 +65,37 @@ def plot_weak_scaling():
     except FileNotFoundError:
         print("Erreur : Le fichier weak_scaling_comparison.csv est introuvable.")
 
+def plot_openmp_scaling():
+    try:
+        # Lecture du CSV du bench OpenMP
+        df = pd.read_csv('openmp_scaling_custom.csv', skipinitialspace=True)
+        
+        plt.figure(figsize=(10, 6))
+        
+        # Tracé de la courbe (Ici on n'a que la version Custom à évaluer)
+        plt.plot(df['Threads'], df['BFS_TEPS'], marker='D', linestyle='-', color='green', linewidth=2, label='Custom (Sac à dos Local)')
+        
+        # Esthétique du graphique
+        plt.title('OpenMP Scaling - Efficacité du Sac à dos (MPI Fixé à np=2)', fontsize=14, fontweight='bold')
+        plt.xlabel('Nombre de Threads OpenMP', fontsize=12)
+        plt.ylabel('Performance (TEPS - Traversed Edges Per Second)', fontsize=12)
+        plt.xticks(df['Threads'].unique())
+        
+        # On force l'axe Y à commencer à 0 pour visualiser l'accélération réelle
+        plt.ylim(bottom=0)
+        plt.grid(True, which="both", ls="--", alpha=0.6)
+        plt.legend(fontsize=12)
+        
+        # Sauvegarde
+        plt.savefig('openmp_scaling_plot_custom.png', dpi=300, bbox_inches='tight')
+        print("Graphique OpenMP Scaling généré : openmp_scaling_plot_custom.png")
+        
+    except FileNotFoundError:
+        print("Erreur : Le fichier openmp_scaling_custom.csv est introuvable.")
+
 if __name__ == "__main__":
-    print("Génération des graphiques.")
+    print("Génération des graphiques...")
     plot_strong_scaling()
     plot_weak_scaling()
+    plot_openmp_scaling()
+    print("Terminé ! Vérifie tes fichiers .png")
