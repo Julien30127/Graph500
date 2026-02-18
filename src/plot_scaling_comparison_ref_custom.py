@@ -8,15 +8,12 @@ def plot_strong_scaling():
         
         plt.figure(figsize=(10, 6))
         
-        # Séparation des données
         ref_data = df[df['Version'] == 'REFERENCE']
         cust_data = df[df['Version'] == 'CUSTOM']
         
-        # Tracé des courbes
         plt.plot(ref_data['Coeurs(np)'], ref_data['BFS_TEPS'], marker='o', linestyle='--', color='red', label='Référence (MPI Pur)')
         plt.plot(cust_data['Coeurs(np)'], cust_data['BFS_TEPS'], marker='s', linestyle='-', color='blue', linewidth=2, label='Custom (Hybride MPI+OpenMP)')
         
-        # Esthétique du graphique
         plt.title('Strong Scaling - Performance du BFS (Taille de graphe fixe)', fontsize=14, fontweight='bold')
         plt.xlabel('Nombre de Processus MPI (np)', fontsize=12)
         plt.ylabel('Performance (TEPS - Traversed Edges Per Second)', fontsize=12)
@@ -24,7 +21,6 @@ def plot_strong_scaling():
         plt.grid(True, which="both", ls="--", alpha=0.6)
         plt.legend(fontsize=12)
         
-        # Sauvegarde
         plt.savefig('strong_scaling_plot_comparison.png', dpi=300, bbox_inches='tight')
         print("Graphique Strong Scaling généré : strong_scaling_plot_comparison.png")
         
@@ -40,16 +36,13 @@ def plot_weak_scaling():
         ref_data = df[df['Version'] == 'REFERENCE']
         cust_data = df[df['Version'] == 'CUSTOM']
         
-        # Pour le weak scaling, on veut voir si la ligne reste horizontale
         plt.plot(ref_data['Coeurs(np)'], ref_data['BFS_TEPS'], marker='o', linestyle='--', color='red', label='Référence (MPI Pur)')
         plt.plot(cust_data['Coeurs(np)'], cust_data['BFS_TEPS'], marker='s', linestyle='-', color='blue', linewidth=2, label='Custom (Hybride MPI+OpenMP)')
         
-        # Esthétique du graphique
         plt.title('Weak Scaling - Performance du BFS (Taille de graphe croissante)', fontsize=14, fontweight='bold')
         plt.xlabel('Configuration (Processus MPI & Taille du Graphe)', fontsize=12)
         plt.ylabel('Performance (TEPS - Traversed Edges Per Second)', fontsize=12)
         
-        # Ajout des labels X avec le SCALE correspondant
         x_labels = [f"np={row['Coeurs(np)']}\n(Scale {row['SCALE']})" for index, row in ref_data.iterrows()]
         plt.xticks(ref_data['Coeurs(np)'], x_labels)
         
@@ -58,7 +51,6 @@ def plot_weak_scaling():
         plt.grid(True, which="both", ls="--", alpha=0.6)
         plt.legend(fontsize=12)
         
-        # Sauvegarde
         plt.savefig('weak_scaling_plot_comparison.png', dpi=300, bbox_inches='tight')
         print("Graphique Weak Scaling généré : weak_scaling_plot_comparison.png")
         
@@ -67,15 +59,12 @@ def plot_weak_scaling():
 
 def plot_openmp_scaling():
     try:
-        # Lecture du CSV du bench OpenMP
         df = pd.read_csv('openmp_scaling_custom.csv', skipinitialspace=True)
         
         plt.figure(figsize=(10, 6))
         
-        # Tracé de la courbe (Ici on n'a que la version Custom à évaluer)
         plt.plot(df['Threads'], df['BFS_TEPS'], marker='D', linestyle='-', color='green', linewidth=2, label='Custom (Sac à dos Local)')
         
-        # Esthétique du graphique
         plt.title('OpenMP Scaling - Efficacité du Sac à dos (MPI Fixé à np=2)', fontsize=14, fontweight='bold')
         plt.xlabel('Nombre de Threads OpenMP', fontsize=12)
         plt.ylabel('Performance (TEPS - Traversed Edges Per Second)', fontsize=12)
@@ -86,7 +75,6 @@ def plot_openmp_scaling():
         plt.grid(True, which="both", ls="--", alpha=0.6)
         plt.legend(fontsize=12)
         
-        # Sauvegarde
         plt.savefig('openmp_scaling_plot_custom.png', dpi=300, bbox_inches='tight')
         print("Graphique OpenMP Scaling généré : openmp_scaling_plot_custom.png")
         

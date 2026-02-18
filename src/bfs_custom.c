@@ -21,7 +21,7 @@ typedef struct visitmsg {
 int *q1, *q2;
 int qc, q2c;
 
-//VISITED bitmap parameters
+//VISITED bitmap
 unsigned long *visited;
 int64_t visited_size;
 
@@ -40,7 +40,7 @@ void visithndl(int from, void* data, int sz) {
     unsigned long old_val = __sync_fetch_and_or(&visited[v_loc / ulong_bits], mask);
 
     if (!(old_val & mask)) { 
-        // Reconstitution magique du parent global
+        // Reconstitution du parent global
         pred_glob[v_loc] = VERTEX_TO_GLOBAL(from, m->vfrom);
         
         int my_spot;
@@ -65,7 +65,6 @@ void make_graph_data_structure(const tuple_graph* const tg) {
     q1 = xmalloc(g.nlocalverts * sizeof(int));
     q2 = xmalloc(g.nlocalverts * sizeof(int));
     
-    // Touch memory 
     for(int i = 0; i < g.nlocalverts; i++) {
         q1[i] = 0;
         q2[i] = 0;
@@ -74,9 +73,7 @@ void make_graph_data_structure(const tuple_graph* const tg) {
     aml_register_handler(visithndl, 1);
 }
 
-//user should provide this function which would be called several times to do kernel 2: breadth first search
-//pred[] should be root for root, -1 for unrechable vertices
-//prior to calling run_bfs pred is set to -1 by calling clean_pred
+
 void run_bfs(int64_t root, int64_t* pred) {
     
     // Connection avec le pointeur global
@@ -113,7 +110,7 @@ void run_bfs(int64_t root, int64_t* pred) {
             
             visitmsg (*local_buf)[CHUNK_SIZE] = malloc(npes * sizeof(*local_buf));
             
-            // local_count : Combien de messages on a actuellement au fond du sac pour chaque cible
+            // Combien de messages on a actuellement au fond du sac pour chaque cible
             int *local_count = calloc(npes, sizeof(int));
 
             // On distribue le travail sans barrière immédiate à la fin
@@ -168,14 +165,14 @@ void run_bfs(int64_t root, int64_t* pred) {
                         
                         local_count[target_rank]++;
 
-                        // Si le sac pour cette cible est PLEIN, on passe au péage
+                        // Si le sac pour cette cible est PLEIN, on passe au guichet
                         if (local_count[target_rank] == CHUNK_SIZE) {
                             
-                            // On prend le verrou UNE SEULE FOIS pour vider les 128 messages très vite
+                            // On prend le verrou une seule fois pour vider les 128 messages rapidement
                             #pragma omp critical
                             {
                                 for (int k = 0; k < CHUNK_SIZE; k++) {
-                                    // Envoi un par un pour que le handler AML puisse les digérer
+                                    // Envoi un par un pour que le handler AML puisse les digérer (sinon, segfault)
                                     aml_send(&local_buf[target_rank][k], 1, sizeof(visitmsg), target_rank);
                                 }
                             }
@@ -224,15 +221,13 @@ void run_bfs(int64_t root, int64_t* pred) {
     aml_barrier();
 }
 
-//we need edge count to calculate teps. Validation will check if this count is correct
-//user should change this function if another format (not standart CRS) used
+
 void get_edge_count_for_teps(int64_t* edge_visit_count) {
     long i,j;
     long edge_count=0;
     for(i=0;i<g.nlocalverts;i++)
         if(pred_glob[i]!=-1) {
             for(j=rowstarts[i];j<rowstarts[i+1];j++)
-                // ICI AUSSI : LA MACRO MAGIQUE
                 if(COLUMN(j)<=VERTEX_TO_GLOBAL(aml_my_pe(),i))
                     edge_count++;
         }
@@ -240,14 +235,14 @@ void get_edge_count_for_teps(int64_t* edge_visit_count) {
     *edge_visit_count=edge_count;
 }
 
-//user provided function to initialize predecessor array to whatevere value user needs
+
 void clean_pred(int64_t* pred) {
     int i;
     #pragma omp parallel for
     for(i=0;i<g.nlocalverts;i++) pred[i]=-1;
 }
 
-//user provided function to be called once graph is no longer needed
+
 void free_graph_data_structure(void) {
     free_oned_csr_graph(&g);
     free(visited);
@@ -255,7 +250,7 @@ void free_graph_data_structure(void) {
     free(q2);
 }
 
-//user should change is function if distribution(and counts) of vertices is changed
+
 size_t get_nlocalverts_for_pred(void) {
     return g.nlocalverts;
 }
