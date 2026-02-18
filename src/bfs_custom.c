@@ -9,248 +9,149 @@
 #include <string.h>
 #include <limits.h>
 #include <assert.h>
-#include <omp.h>
+#include <stdint.h>
 
-// Structure pour les messages
-typedef struct visitmsg {
-    int vloc;
-    int vfrom;
-} visitmsg;
+#ifdef DEBUGSTATS
+extern int64_t nbytes_sent,nbytes_rcvd;
+#endif
+// two arrays holding visited VERTEX_LOCALs for current and next level
+// we swap pointers each time
+int *q1,*q2;
+int qc,q2c; //pointer to first free element
 
-// Double buffer (comme la référence)
-int *q1, *q2;
-int qc, q2c;
-
-//VISITED bitmap
+//VISITED bitmap parameters
 unsigned long *visited;
 int64_t visited_size;
 
-int64_t *pred_glob, *column;
-unsigned int *rowstarts;
+//global variables of CSR graph to be used inside of AM-handlers
+int64_t *column;
+int64_t *pred_glob;
+unsigned int * rowstarts;
+
 oned_csr_graph g;
 
-// Le Handler (exécutée sur le nœud receveur)
-void visithndl(int from, void* data, int sz) {
-    if (!pred_glob || !visited || !q2) return; 
-    
-    visitmsg *m = data;
-    int v_loc = m->vloc;
-    
-    unsigned long mask = 1UL << (v_loc % ulong_bits);
-    unsigned long old_val = __sync_fetch_and_or(&visited[v_loc / ulong_bits], mask);
+typedef struct visitmsg {
+	//both vertexes are VERTEX_LOCAL components as we know src and dest PEs to reconstruct VERTEX_GLOBAL
+	int vloc;
+	int vfrom;
+} visitmsg;
 
-    if (!(old_val & mask)) { 
-        // Reconstitution du parent global
-        pred_glob[v_loc] = VERTEX_TO_GLOBAL(from, m->vfrom);
-        
-        int my_spot;
-        #pragma omp atomic capture
-        {
-            my_spot = q2c; 
-            q2c++; 
-        }
-        q2[my_spot] = v_loc;
-    }
+#pragma omp threadprivate(q1, q2, qc, q2c, visited, pred_glob)
+
+//AM-handler for check&visit
+void visithndl(int from,void* data,int sz) {
+	visitmsg *m = data;
+	if (!TEST_VISITEDLOC(m->vloc)) {
+		SET_VISITEDLOC(m->vloc);
+		q2[q2c++] = m->vloc;
+		pred_glob[m->vloc] = VERTEX_TO_GLOBAL(from,m->vfrom);
+	}
+}
+
+inline void send_visit(int64_t glob, int from) {
+	visitmsg m = {VERTEX_LOCAL(glob),from};
+	aml_send(&m,1,sizeof(visitmsg),VERTEX_OWNER(glob));
 }
 
 void make_graph_data_structure(const tuple_graph* const tg) {
-    
-    convert_graph_to_oned_csr(tg, &g);
-    column = g.column;
-    rowstarts = g.rowstarts;
+	int i,j,k;
+	convert_graph_to_oned_csr(tg, &g);
+	column=g.column;
+	rowstarts=g.rowstarts;
 
-    visited_size = (g.nlocalverts + ulong_bits - 1) / ulong_bits;
-    visited = xmalloc(visited_size * sizeof(unsigned long));
-
-    q1 = xmalloc(g.nlocalverts * sizeof(int));
-    q2 = xmalloc(g.nlocalverts * sizeof(int));
-    
-    for(int i = 0; i < g.nlocalverts; i++) {
-        q1[i] = 0;
-        q2[i] = 0;
-    }
-
-    aml_register_handler(visithndl, 1);
+	visited_size = (g.nlocalverts + ulong_bits - 1) / ulong_bits;
+	#pragma omp parallel 
+	{
+		aml_register_handler(visithndl,1);
+		q1 = xmalloc(g.nlocalverts*sizeof(int)); //100% of vertexes
+		q2 = xmalloc(g.nlocalverts*sizeof(int));
+		for(i=0;i<g.nlocalverts;i++) q1[i]=0,q2[i]=0; //touch memory
+		visited = xmalloc(visited_size*sizeof(unsigned long));
+	}
 }
-
 
 void run_bfs(int64_t root, int64_t* pred) {
-    
-    // Connection avec le pointeur global
-    pred_glob = pred;
-    aml_register_handler(visithndl, 1);
+	int64_t nvisited;
+	long sum;
+	unsigned int i,j,k,lvl=1;
+	pred_glob=pred;
 
-    // Nettoyage du tableau visited
-    memset(visited, 0, visited_size * sizeof(unsigned long));
+	CLEAN_VISITED();
+	qc=0; sum=1; q2c=0;
+	nvisited=1;
 
-    qc = 0; 
-    q2c = 0;
-    long sum = 1;
+	if(VERTEX_OWNER(root) == rank) {
+		pred[VERTEX_LOCAL(root)]=root;
+		SET_VISITED(root);
+		q1[0]=VERTEX_LOCAL(root);
+		qc=1;
+	} 
 
-    // Pour le processus qui possède la racine :
-    if (VERTEX_OWNER(root) == aml_my_pe()) { 
-        int local_root = VERTEX_LOCAL(root);
-        visited[local_root / ulong_bits] |= (1UL << (local_root % ulong_bits));
-        pred[local_root] = root;
-        q1[0] = local_root; 
-        qc = 1; 
-    }
+	// While there are vertices in current level
+	while(sum) {
+#ifdef DEBUGSTATS
+		double t0=aml_time();
+		nbytes_sent=0; nbytes_rcvd=0;
+#endif
+		//for all vertices in current level send visit AMs to all neighbours
+		for(i=0;i<qc;i++)
+			for(j=rowstarts[q1[i]];j<rowstarts[q1[i]+1];j++) {
+				#pragma omp critical
+				{
+					// send_visit(COLUMN(j),q1[i]);
+					visitmsg m = {VERTEX_LOCAL(COLUMN(j)), q1[i]};
+					if (!TEST_VISITEDLOC(m.vloc)) {
+						SET_VISITEDLOC(m.vloc);
+						q2[q2c++] = m.vloc;
+						pred_glob[m.vloc] = VERTEX_TO_GLOBAL(0, m.vfrom);
+					}
+					// visithndl(q1[i], &m, 0);
+				}
+			}
 
-    // Tant qu'au moins un nœud sur le supercalculateur a quelque chose à traiter
-    while (sum > 0) {
-    
-        int npes = aml_n_pes(); // Nombre total de nœuds MPI
+		qc=q2c;int *tmp=q1;q1=q2;q2=tmp;
+		sum=qc;
 
-        // Parallelisation de la lecture de la file q1 (Mais cette fois on ouvre la zone avant la boucle pour allouer la RAM locale)
-        #pragma omp parallel 
-        {
-            // Création de l'objet "sac-à-dos"
-            // On définit la taille du sac (à adapter selon la taille du cache L1)
-            const int CHUNK_SIZE = 128; 
-            
-            visitmsg (*local_buf)[CHUNK_SIZE] = malloc(npes * sizeof(*local_buf));
-            
-            // Combien de messages on a actuellement au fond du sac pour chaque cible
-            int *local_count = calloc(npes, sizeof(int));
+		nvisited+=sum;
 
-            // On distribue le travail sans barrière immédiate à la fin
-            #pragma omp for nowait
-            for (int i = 0; i < qc; i++) {
-                
-                // Chaque thread pioche un sommet
-                int u_local = q1[i];
-                
-                // Nom global ?
-                int64_t u_global = VERTEX_TO_GLOBAL(aml_my_pe(), u_local);
-
-                // On récupère les limites pour lire ses voisins dans le graphe CSR
-                unsigned int start = rowstarts[u_local]; 
-                unsigned int end   = rowstarts[u_local + 1];
-
-                // On boucle sur eux
-                for (unsigned int j = start; j < end; j++) {
-                    
-                    int64_t v_global = COLUMN(j); 
-
-                    // À qui est ce voisin ?
-                    if (VERTEX_OWNER(v_global) == aml_my_pe()) {
-                        
-                        // CAS 1 : Sur "notre" noeud
-                        int v_local = VERTEX_LOCAL(v_global);
-                        unsigned long mask = 1UL << (v_local % ulong_bits);
-                        
-                        unsigned long old_val = __sync_fetch_and_or(&visited[v_local / ulong_bits], mask);
-
-                        // Si l'ancienne valeur ne contenait pas déjà ce bit à 1 
-                        if (!(old_val & mask)) { 
-                            pred[v_local] = u_global;
-
-                            int my_spot;
-                            #pragma omp atomic capture
-                            {
-                                my_spot = q2c; 
-                                q2c++; 
-                            }
-                            q2[my_spot] = v_local;
-                        }
-                    } else {
-
-                        // CAS 2 : Sur un autre noeud (aie aie aie, MPI -> rhyme)
-                        int target_rank = VERTEX_OWNER(v_global);
-        
-                        // Au lieu d'envoyer directement, on glisse le voisin dans le sac à dos personnel
-                        int idx = local_count[target_rank];
-                        local_buf[target_rank][idx].vloc = VERTEX_LOCAL(v_global);
-                        local_buf[target_rank][idx].vfrom = u_local;
-                        
-                        local_count[target_rank]++;
-
-                        // Si le sac pour cette cible est PLEIN, on passe au guichet
-                        if (local_count[target_rank] == CHUNK_SIZE) {
-                            
-                            // On prend le verrou une seule fois pour vider les 128 messages rapidement
-                            #pragma omp critical
-                            {
-                                for (int k = 0; k < CHUNK_SIZE; k++) {
-                                    // Envoi un par un pour que le handler AML puisse les digérer (sinon, segfault)
-                                    aml_send(&local_buf[target_rank][k], 1, sizeof(visitmsg), target_rank);
-                                }
-                            }
-                            // On vide le sac : la journée a été dure, la séance de psy coûte cher
-                            local_count[target_rank] = 0;
-                        }
-                    }
-                }
-            }
-
-            
-            // La boucle est finie, mais il reste peut-être des messages non envoyés dans les sacs -> On vide tout.
-            for(int p = 0; p < npes; p++) {
-                if(local_count[p] > 0) {
-                    #pragma omp critical
-                    {
-                        for (int k = 0; k < local_count[p]; k++) {
-                            aml_send(&local_buf[p][k], 1, sizeof(visitmsg), p);
-                        }
-                    }
-                }
-            }
-
-            
-            free(local_buf);
-            free(local_count);
-
-        }
-        
-        // On attend la réception de tous les messages (qui vont remplir q2 via visithndl)
-        aml_barrier();
-
-        // Échange des buffers (q1 devient la nouvelle frontière)
-        qc = q2c;
-        int *tmp = q1; 
-        q1 = q2; 
-        q2 = tmp;
-
-        // On synchronise avec tous les autres nœuds
-        sum = qc;
-        aml_long_allsum(&sum); 
-        
-        // On prépare le buffer de réception pour le prochain tour
-        q2c = 0;
-    }
-    aml_barrier();
+		q2c=0;
+#ifdef DEBUGSTATS
+		aml_long_allsum(&nbytes_sent);
+		t0-=aml_time();
+		if(!my_pe()) printf (" --lvl%d : %lld(%lld,%3.2f) visited in %5.2fs, network aggr %5.2fGb/s\n",lvl++,sum,nvisited,((double)nvisited/(double)g.notisolated)*100.0,-t0,-(double)nbytes_sent*8.0/(1.e9*t0));
+#endif
+	}
 }
 
-
+//we need edge count to calculate teps. Validation will check if this count is correct
 void get_edge_count_for_teps(int64_t* edge_visit_count) {
-    long i,j;
-    long edge_count=0;
-    for(i=0;i<g.nlocalverts;i++)
-        if(pred_glob[i]!=-1) {
-            for(j=rowstarts[i];j<rowstarts[i+1];j++)
-                if(COLUMN(j)<=VERTEX_TO_GLOBAL(aml_my_pe(),i))
-                    edge_count++;
-        }
-    aml_long_allsum(&edge_count);
-    *edge_visit_count=edge_count;
-}
+	long i,j;
+	long edge_count=0;
+	for(i=0;i<g.nlocalverts;i++)
+		if(pred_glob[i]!=-1) {
+			for(j=rowstarts[i];j<rowstarts[i+1];j++)
+				if(COLUMN(j)<=VERTEX_TO_GLOBAL(my_pe(),i))
+					edge_count++;
 
+		}
+
+	aml_long_allsum(&edge_count);
+	*edge_visit_count=edge_count;
+}
 
 void clean_pred(int64_t* pred) {
-    int i;
-    #pragma omp parallel for
-    for(i=0;i<g.nlocalverts;i++) pred[i]=-1;
+	int i;
+	for(i=0;i<g.nlocalverts;i++) pred[i]=-1;
 }
-
-
 void free_graph_data_structure(void) {
-    free_oned_csr_graph(&g);
-    free(visited);
-    free(q1); 
-    free(q2);
+	#pragma omp parallel
+	{
+		int i; 
+		free_oned_csr_graph(&g);
+		free(q1); free(q2); free(visited);
+	}
 }
-
 
 size_t get_nlocalverts_for_pred(void) {
-    return g.nlocalverts;
+	return g.nlocalverts;
 }
